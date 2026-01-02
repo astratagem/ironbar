@@ -54,13 +54,17 @@ pub use self::marquee::{MarqueeMode, MarqueeOnHover};
 pub use self::truncate::{EllipsizeMode, TruncateMode};
 
 use gtk::prelude::ObjectExt;
+use gtk::InterfaceColorScheme;
 use std::sync::OnceLock;
+
+/// Track if we've set GTK's setting yet
+static GTK_SETTING_INITIALIZED: OnceLock<()> = OnceLock::new();
 
 /// Global double-click time setting
 static DOUBLE_CLICK_TIME: OnceLock<DoubleClickTime> = OnceLock::new();
 
-/// Track if we've set GTK's setting yet
-static GTK_SETTING_INITIALIZED: OnceLock<()> = OnceLock::new();
+/// Global color scheme setting
+static COLOR_SCHEME: OnceLock<ColorScheme> = OnceLock::new();
 
 /// Initialize the global double-click time setting
 pub fn set_double_click_time(time: DoubleClickTime) {
@@ -69,14 +73,7 @@ pub fn set_double_click_time(time: DoubleClickTime) {
 
 /// Get the configured double-click time in milliseconds
 pub fn get_double_click_time_ms() -> u64 {
-    // Initialize GTK's setting once (after GTK is initialized)
-    GTK_SETTING_INITIALIZED.get_or_init(|| {
-        if let (Some(DoubleClickTime::Ms(ms)), Some(settings)) =
-            (DOUBLE_CLICK_TIME.get(), gtk::Settings::default())
-        {
-            settings.set_property("gtk-double-click-time", *ms as i32);
-        }
-    });
+    init_gtk_settings();
 
     DOUBLE_CLICK_TIME
         .get()
@@ -91,9 +88,60 @@ pub fn get_double_click_time_ms() -> u64 {
         })
         .expect("double_click_time should be initialized during config load")
 }
-use crate::Ironbar;
+
+/// Store the color scheme setting globally.
+pub fn set_color_scheme(scheme: ColorScheme) {
+    let _ = COLOR_SCHEME.set(scheme);
+}
+
+/// Apply the color scheme to the CSS provider.
+pub fn init_color_scheme(provider: &gtk::CssProvider) {
+    init_gtk_settings();
+
+    if let Some(scheme) = COLOR_SCHEME.get() {
+        let interface_scheme = match scheme {
+            ColorScheme::Auto => {
+                if let Some(settings) = gtk::Settings::default() {
+                    settings.gtk_interface_color_scheme()
+                } else {
+                    InterfaceColorScheme::Default
+                }
+            }
+            ColorScheme::Dark => InterfaceColorScheme::Dark,
+            ColorScheme::Light => InterfaceColorScheme::Light,
+        };
+        provider.set_prefers_color_scheme(interface_scheme);
+    }
+}
+
+/// Initialize all GTK settings once after GTK is initialized.
+pub fn init_gtk_settings() {
+    GTK_SETTING_INITIALIZED.get_or_init(|| {
+        let settings = gtk::Settings::default();
+
+        if let (Some(DoubleClickTime::Ms(ms)), Some(settings)) =
+            (DOUBLE_CLICK_TIME.get(), &settings)
+        {
+            settings.set_property("gtk-double-click-time", *ms as i32);
+        }
+
+        if let (Some(scheme), Some(settings)) = (COLOR_SCHEME.get(), &settings) {
+            match scheme {
+                ColorScheme::Dark => {
+                    settings.set_property("gtk-application-prefer-dark-theme", true)
+                }
+                ColorScheme::Light => {
+                    settings.set_property("gtk-application-prefer-dark-theme", false)
+                }
+                ColorScheme::Auto => {}
+            }
+        }
+    });
+}
+
 use crate::modules::{AnyModuleFactory, ModuleFactory, ModuleInfo, ModuleRef};
 use crate::style::CssSource;
+use crate::Ironbar;
 use cfg_if::cfg_if;
 use color_eyre::Result;
 use config::FileFormat;
@@ -502,6 +550,14 @@ pub struct Config {
     /// **Default**: `250`
     #[serde(default)]
     pub double_click_time: DoubleClickTime,
+
+    /// Color scheme preference for `prefers-color-scheme` CSS media queries.
+    /// Set to `"light"` or `"dark"` to override, or `"auto"` (default)
+    /// to inherit the current system preference.
+    ///
+    /// **Default**: `"auto"`
+    #[serde(default)]
+    pub color_scheme: ColorScheme,
 }
 
 /// Double-click time configuration
@@ -520,6 +576,20 @@ impl Default for DoubleClickTime {
     fn default() -> Self {
         Self::Ms(250)
     }
+}
+
+/// Color scheme preference for CSS `prefers-color-scheme` media queries.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ColorScheme {
+    /// Use system preference from XDG settings portal.
+    #[default]
+    Auto,
+    /// Force light color scheme.
+    Light,
+    /// Force dark color scheme.
+    Dark,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -648,9 +718,10 @@ impl Config {
             }
         }
 
-        // Store the double-click time globally
-        // GTK's setting will be set lazily on first use (after GTK is initialized)
+        // GTK settings will be set lazily on first use (after GTK is
+        // initialized).
         set_double_click_time(config.double_click_time.clone());
+        set_color_scheme(config.color_scheme.clone());
 
         (config, css_source)
     }
@@ -663,5 +734,26 @@ impl Config {
         panic!(
             "Ironbar has been configured without config support. This won't work. Please reconfigure with at least one `config` feature flag enabled."
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_scheme_default_is_auto() {
+        assert!(matches!(ColorScheme::default(), ColorScheme::Auto));
+    }
+
+    #[test]
+    fn color_scheme_deserialize_variants() {
+        let auto: ColorScheme = serde_json::from_str(r#""auto""#).expect("deserialize auto");
+        let light: ColorScheme = serde_json::from_str(r#""light""#).expect("deserialize light");
+        let dark: ColorScheme = serde_json::from_str(r#""dark""#).expect("deserialize dark");
+
+        assert!(matches!(auto, ColorScheme::Auto));
+        assert!(matches!(light, ColorScheme::Light));
+        assert!(matches!(dark, ColorScheme::Dark));
     }
 }
