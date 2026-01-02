@@ -1,4 +1,5 @@
 use crate::channels::{AsyncSenderExt, MpscReceiverExt};
+use crate::config::init_color_scheme;
 use crate::spawn;
 use gtk::ffi::GTK_STYLE_PROVIDER_PRIORITY_USER;
 use gtk::{CssProvider, gio};
@@ -24,6 +25,8 @@ pub enum CssSource {
 /// write changes are detected on the file.
 pub fn load_css(source: &CssSource) {
     let provider = CssProvider::new();
+
+    init_color_scheme(&provider);
 
     let path = match source {
         CssSource::String(str) => {
