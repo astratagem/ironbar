@@ -7,7 +7,7 @@ use crate::bar::Bar;
 use crate::channels::{MpscReceiverExt, SyncSenderExt};
 use crate::clients::{ClientResult, ProvidesClient, ProvidesFallibleClient};
 use crate::config::{BarPosition, CommonConfig, TransitionType};
-use crate::gtk_helpers::IronbarGtkExt;
+use crate::gtk_helpers::IronbarGlibExt;
 use crate::popup::{ButtonFinder, Popup};
 use color_eyre::Result;
 use gtk::gdk::Monitor;
@@ -22,6 +22,8 @@ pub mod battery;
 pub mod bindmode;
 #[cfg(feature = "bluetooth")]
 pub mod bluetooth;
+#[cfg(feature = "brightness")]
+pub mod brightness;
 #[cfg(feature = "cairo")]
 pub mod cairo;
 #[cfg(feature = "clipboard")]
@@ -198,8 +200,18 @@ pub struct ModulePopupParts {
     /// An array of buttons which can be used for opening the popup.
     /// For most modules, this will only be a single button.
     pub buttons: Vec<Button>,
+    /// Whether this module disallows the popover widget from using autohide.
+    /// Where popups are controlled via hover, autohide can cause issues.
+    pub disable_autohide: bool,
 
     pub button_finder: Option<Rc<ButtonFinder>>,
+}
+
+impl ModulePopupParts {
+    fn disable_autohide(mut self) -> Self {
+        self.disable_autohide = true;
+        self
+    }
 }
 
 impl Debug for ModulePopupParts {
@@ -229,6 +241,7 @@ impl ModulePopup for Option<gtk::Box> {
             container,
             buttons,
             button_finder: None,
+            disable_autohide: false,
         })
     }
 
@@ -237,6 +250,7 @@ impl ModulePopup for Option<gtk::Box> {
             container,
             buttons: vec![],
             button_finder: Some(finder),
+            disable_autohide: false,
         })
     }
 }
@@ -285,6 +299,8 @@ where
 
     fn name() -> &'static str;
 
+    fn on_create(&mut self) {}
+
     fn spawn_controller(
         &self,
         info: &ModuleInfo,
@@ -329,6 +345,8 @@ pub trait ModuleFactory {
         TWidget: IsA<Widget>,
         TSend: Debug + Clone + Send + 'static,
     {
+        module.on_create();
+
         let id = Ironbar::unique_id();
         let common = module.take_common();
 
@@ -458,7 +476,7 @@ impl ModuleFactory for BarModuleFactory {
                 popup.hide();
             }
             ModuleUpdateEvent::LockVisible(lock) => {
-                println!("Setting bar locked status: {lock}");
+                debug!("Setting bar locked status: {lock}");
                 bar.set_locked(lock);
             }
             _ => {}

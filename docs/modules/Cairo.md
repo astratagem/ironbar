@@ -90,20 +90,69 @@ let {
 
 ### Script
 
-Every script must contain a function called `draw`. 
-This takes a single parameter, which is the Cairo context.
+Every script must return a function or callable table with three parameters:
+- Cairo context (required)
+- Width of the drawing area (can be omitted)
+- Height of the drawing area (can be omitted)
 
 Outside of this, you can do whatever you like. 
 The full lua `stdlib` is available, and you can load in additional system packages as desired.
 
-The most basic example, which draws a red square, can be seen below:
+Additionally there is basic access to the ironbar via the `ironbar` global:
+- `ironbar.config_dir`: Absolute path to the configuration directory. This can be used for relative file imports, e.g.:
+  ```lua
+   local_module = dofile(ironbar.config_dir .. "local_mod.lua")`
+   ```
+- `ironbar:log_debug(msg)`, `ironbar:log_info(msg)`, `ironbar:log_warn(msg)`, `ironbar:log_error(msg)`: Write a log message.
+- `ironbar:unixtime()`: Returns high-resolution unixtime (stdlib only offers second-resolution). Will return a table:
+  - `secs`: Seconds since unix-epoch with fractions
+  - `subsec_millis`: Sub-second milliseconds as integer
+  - `subsec_micros`: Sub-second microseconds as integer
+- `ironbar:var_get(key)`: Get an ironbar variable, e.g.
+  ```lua
+  memory_free = ironbar:var_get("sysinfo.memory_free")
+  ```
+- `ironbar:var_list(namespace)`: Get all variables of a namespace as table (non-recursive), e.g.:
+  ```lua
+  memory_free = ironbar:var_list("sysinfo")["memory_free"]
+  ```
 
-```lua
-function draw(cr) 
+Basic examples, which draw a red square
+- As anonymous function:
+  ```lua
+  return function(cr) 
     cr:set_source_rgb(1.0, 0.0, 0.0)
     cr:paint()
-end
-```
+  end
+  ```
+- As local function:
+  ```lua
+  local function draw_square(cr) 
+    cr:set_source_rgb(1.0, 0.0, 0.0)
+    cr:paint()
+  end
+
+  return draw_square
+  ```
+- As callable table (also using width and height):
+  ```lua
+  local square = {}
+
+  function square:draw(cr, width, height)
+    cr:set_source_rgb(1.0, 0.0, 0.0)
+    cr:rectangle(0, 0, width, height)
+    cr:fill()
+  end
+
+  setmetatable(square, {
+   __call = function(o, cr, width, height)
+      return o:draw(cr, width, height)
+   end,
+  })
+
+  return square
+  ```
+
 
 A longer example, used to create the clock in the image at the top of the page, is shown below:
 
@@ -111,22 +160,17 @@ A longer example, used to create the clock in the image at the top of the page, 
 <summary>Circle clock</summary>
 
 ```lua
-function get_ms()
-    local ms = tostring(io.popen('date +%s%3N'):read('a')):sub(-4, 9999)
-    return tonumber(ms) / 1000
-end
-
-function draw(cr)
-    local center_x = 150
-    local center_y = 150
-    local radius = 130
+local function draw_clock(cr, width, height)
+    local center_x = width / 2
+    local center_y = height / 2
+    local radius = math.min(width, height) / 2 - 20
 
     local date_table = os.date("*t")
 
     local hours = date_table["hour"]
     local minutes = date_table["min"]
     local seconds = date_table["sec"]
-    local ms = get_ms()
+    local ms = ironbar:unixtime().subsec_millis / 1000
 
 
     local label_seconds = seconds
@@ -184,6 +228,8 @@ function draw(cr)
 
     return 0
 end
+
+return draw_clock
 ```
 
 </details>

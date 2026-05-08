@@ -3,6 +3,7 @@
 - [Compiling from source](compiling)
 - [Configuration guide](configuration-guide)
   - [Images](images)
+  - [Profiles](profiles)
 - [Styling guide](styling-guide)
 - [Migrating to GTK4](gtk4)
 - [Development guide](development-guide)
@@ -24,11 +25,13 @@
 
 - [Power Menu](power-menu)
 - [Weather](weather)
+- [Cairo CPU Graph](cpu-cores-graph)
 
 # Modules
 
 - [Battery](battery)
 - [Bindmode](bindmode)
+- [Brightness](brightness)
 - [Bluetooth](bluetooth)
 - [Clipboard](clipboard)
 - [Clock](clock)

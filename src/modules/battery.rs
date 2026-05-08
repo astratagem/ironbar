@@ -1,7 +1,7 @@
 use crate::channels::{AsyncSenderExt, BroadcastReceiverExt};
 use crate::clients::upower;
 use crate::clients::upower::BatteryState;
-use crate::config::{CommonConfig, LayoutConfig, default};
+use crate::config::{CommonConfig, LayoutConfig, Profiles, State, default};
 use crate::gtk_helpers::IronbarLabelExt;
 use crate::image::IconLabel;
 use crate::modules::PopupButton;
@@ -10,34 +10,88 @@ use crate::modules::{
 };
 use crate::{module_impl, spawn};
 use color_eyre::Result;
-use futures_lite::stream::StreamExt;
 use gtk::{Button, prelude::*};
 use gtk::{Label, Orientation};
 use serde::Deserialize;
 use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::fmt::{Display, Formatter, Write};
+use std::fmt::Write;
 use tokio::sync::mpsc;
-use zbus::zvariant::OwnedValue;
 
 const DAY: i64 = 24 * 60 * 60;
 const HOUR: i64 = 60 * 60;
 const MINUTE: i64 = 60;
 
+/// The battery module uses a compound state object.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
+#[serde(default)]
+struct ProfileState {
+    /// Battery charged percentage.
+    percent: f64,
+    /// Whether the battery is currently charging.
+    /// Omit to match regardless of charging state.
+    charging: Option<bool>,
+}
+
+impl Default for ProfileState {
+    fn default() -> Self {
+        Self {
+            percent: 100.0,
+            charging: None,
+        }
+    }
+}
+
+impl PartialOrd for ProfileState {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self.percent == other.percent {
+            match (self.charging, other.charging) {
+                (Some(_), Some(_)) | (None, None) => Some(Ordering::Equal),
+                (None, Some(_)) => Some(Ordering::Greater),
+                (Some(_), None) => Some(Ordering::Less),
+            }
+        } else {
+            self.percent.partial_cmp(&other.percent)
+        }
+    }
+}
+
+impl State for ProfileState {
+    fn matches(&self, value: &Self) -> bool {
+        match self.charging {
+            Some(charging) => {
+                charging == value.charging.expect("value should exist")
+                    && value.percent <= self.percent
+            }
+            None => value.percent <= self.percent,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
 #[serde(default)]
-pub struct BatteryModule {
+struct BatteryProfile {
     /// The format string to use for the widget button label.
     /// For available tokens, see [below](#formatting-tokens).
     ///
     /// **Default**: `{percentage}%`
     format: String,
+}
 
+#[derive(Debug, Deserialize, Clone)]
+#[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
+#[serde(default)]
+pub struct BatteryModule {
     /// The size to render the icon at, in pixels.
     ///
     /// **Default**: `24`
     icon_size: i32,
+
+    // -- Common --
+    /// See [layout options](module-level-options#layout)
+    #[serde(flatten)]
+    layout: LayoutConfig,
 
     /// Whether to show the icon.
     ///
@@ -49,37 +103,9 @@ pub struct BatteryModule {
     /// **Default**: `true`
     show_label: bool,
 
-    // -- Common --
-    /// See [layout options](module-level-options#layout)
+    /// See [profiles](profiles).
     #[serde(flatten)]
-    layout: LayoutConfig,
-
-    /// A map of threshold names to apply as classes,
-    /// against the battery percentage at which to apply them.
-    ///
-    /// Thresholds work by applying the nearest value
-    /// above the current percentage, if present.
-    ///
-    /// For example, using the below config:
-    /// ```corn
-    /// {
-    ///   end = [
-    ///     {
-    ///       type = "battery"
-    ///       format = "{percentage}%"
-    ///       thresholds.warning = 20
-    ///       thresholds.critical = 5
-    ///     }
-    ///   ]
-    /// }
-    /// ```
-    /// At battery levels below 20%,
-    /// the `.warning` class will be applied to the top-level widget.
-    /// Below 5%, `.critical` will be applied instead.
-    /// Above 20%, no class applies.
-    ///
-    /// **Default**: `{}`
-    thresholds: HashMap<Box<str>, f64>,
+    profiles: Profiles<ProfileState, BatteryProfile>,
 
     /// See [common options](module-level-options#common-options).
     #[serde(flatten)]
@@ -89,28 +115,33 @@ pub struct BatteryModule {
 impl Default for BatteryModule {
     fn default() -> Self {
         Self {
-            format: "{percentage}%".to_string(),
             icon_size: default::IconSize::Small as i32,
             layout: LayoutConfig::default(),
             show_icon: true,
             show_label: true,
-            thresholds: HashMap::new(),
+            profiles: Profiles::default(),
             common: Some(CommonConfig::default()),
         }
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct UpowerProperties {
-    percentage: f64,
-    icon_name: String,
-    state: BatteryState,
+impl Default for BatteryProfile {
+    fn default() -> Self {
+        Self {
+            format: "{percentage}%".to_string(),
+        }
+    }
+}
+
+struct BatteryUiUpdate {
     time_to_full: i64,
     time_to_empty: i64,
+    icon_name: String,
+    state_name: String,
 }
 
 impl Module<Button> for BatteryModule {
-    type SendMessage = UpowerProperties;
+    type SendMessage = upower::State;
     type ReceiveMessage = ();
 
     module_impl!("battery");
@@ -123,47 +154,15 @@ impl Module<Button> for BatteryModule {
     ) -> Result<()> {
         let tx = context.tx.clone();
 
-        let display_proxy = context.try_client::<upower::Client>()?;
+        let client = context.try_client::<upower::Client>()?;
 
         spawn(async move {
-            let mut prop_changed_stream = display_proxy.receive_properties_changed().await?;
+            let properties = client.state().await?;
+            tx.send_update(properties).await;
 
-            let mut properties: UpowerProperties = display_proxy
-                .get_all(display_proxy.interface_name.clone())
-                .await?
-                .try_into()?;
-
-            tx.send_update(properties.clone()).await;
-
-            while let Some(signal) = prop_changed_stream.next().await {
-                let args = signal.args().expect("Invalid signal arguments");
-                if args.interface_name != display_proxy.interface_name {
-                    continue;
-                }
-
-                for (key, value) in args.changed_properties {
-                    match key {
-                        "Percentage" => {
-                            properties.percentage = value.downcast::<f64>().unwrap_or_default();
-                        }
-                        "IconName" => {
-                            properties.icon_name = value.downcast::<String>().unwrap_or_default();
-                        }
-                        "State" => {
-                            properties.state =
-                                value.downcast_ref::<BatteryState>().unwrap_or_default();
-                        }
-                        "TimeToFull" => {
-                            properties.time_to_full = value.downcast::<i64>().unwrap_or_default();
-                        }
-                        "TimeToEmpty" => {
-                            properties.time_to_empty = value.downcast::<i64>().unwrap_or_default();
-                        }
-                        _ => {}
-                    }
-                }
-
-                tx.send_update(properties.clone()).await;
+            let mut rx = client.subscribe();
+            while let Ok(properties) = rx.recv().await {
+                tx.send_update(properties).await;
             }
 
             Result::<()>::Ok(())
@@ -188,7 +187,6 @@ impl Module<Button> for BatteryModule {
         let label = match self.show_label {
             true => {
                 let label = Label::builder()
-                    .label(&self.format)
                     .use_markup(true)
                     .justify(self.layout.justify.into())
                     .build();
@@ -217,45 +215,54 @@ impl Module<Button> for BatteryModule {
             tx.send_spawn(ModuleUpdateEvent::TogglePopup(button.popup_id()));
         });
 
+        let mut manager = self.profiles.attach(&button, move |_button, event| {
+            let state = event.state;
+            let properties: BatteryUiUpdate = event.data;
+
+            if let Some(l) = &label {
+                let time_remaining = if state.charging.expect("should be present on state") {
+                    seconds_to_string(properties.time_to_full)
+                } else {
+                    seconds_to_string(properties.time_to_empty)
+                }
+                .unwrap_or_default();
+                let format = event
+                    .profile
+                    .format
+                    .replace("{percentage}", &state.percent.round().to_string())
+                    .replace("{time_remaining}", &time_remaining)
+                    .replace("{state}", &properties.state_name);
+
+                l.set_label_escaped(&format);
+            }
+
+            if let Some(i) = &icon {
+                i.set_label(Some(&format!("icon:{}", properties.icon_name)));
+            }
+        });
+
         let rx = context.subscribe();
-        rx.recv_glib(
-            (&button, &self.format, &self.thresholds),
-            move |(button, format, thresholds), properties| {
-                let percentage = properties.percentage;
+        rx.recv_glib((), move |(), properties| {
+            let percent = properties.percentage;
 
-                if let Some(l) = &label {
-                    let state = properties.state;
-                    let is_charging =
-                        state == BatteryState::Charging || state == BatteryState::PendingCharge;
-                    let time_remaining = if is_charging {
-                        seconds_to_string(properties.time_to_full)
-                    } else {
-                        seconds_to_string(properties.time_to_empty)
-                    }
-                    .unwrap_or_default();
-                    let format = format
-                        .replace("{percentage}", &percentage.round().to_string())
-                        .replace("{time_remaining}", &time_remaining)
-                        .replace("{state}", &state.to_string());
+            let state = properties.state;
+            let charging = state == BatteryState::Charging || state == BatteryState::PendingCharge;
 
-                    l.set_label_escaped(&format);
-                }
+            let data = BatteryUiUpdate {
+                time_to_full: properties.time_to_full,
+                time_to_empty: properties.time_to_empty,
+                icon_name: properties.icon_name,
+                state_name: state.to_string(),
+            };
 
-                if let Some(i) = &icon {
-                    i.set_label(Some(&format!("icon:{}", properties.icon_name)));
-                }
-
-                if let Some(threshold) = get_threshold(percentage, thresholds) {
-                    button.add_css_class(threshold);
-
-                    for class in thresholds.keys() {
-                        if **class != *threshold {
-                            button.remove_css_class(class);
-                        }
-                    }
-                }
-            },
-        );
+            manager.update(
+                ProfileState {
+                    percent,
+                    charging: Some(charging),
+                },
+                data,
+            );
+        });
 
         let popup = self
             .into_popup(context, info)
@@ -288,7 +295,7 @@ impl Module<Button> for BatteryModule {
                     if ttf > 0 {
                         format!("Full in {}", seconds_to_string(ttf).unwrap_or_default())
                     } else {
-                        String::new()
+                        "Estimating charging speed".to_string()
                     }
                 }
                 BatteryState::Discharging | BatteryState::PendingDischarge => {
@@ -296,31 +303,18 @@ impl Module<Button> for BatteryModule {
                     if tte > 0 {
                         format!("Empty in {}", seconds_to_string(tte).unwrap_or_default())
                     } else {
-                        String::new()
+                        "Estimating battery usage".to_string()
                     }
                 }
-                _ => String::new(),
+                BatteryState::Unknown => "Battery state unknown".to_string(),
+                BatteryState::Empty => "Battery empty".to_string(),
+                BatteryState::FullyCharged => "Battery fully charged".to_string(),
             };
 
             label.set_label_escaped(&format);
         });
 
         Some(container)
-    }
-}
-
-fn get_threshold(percent: f64, thresholds: &HashMap<Box<str>, f64>) -> Option<&str> {
-    let mut candidates = thresholds
-        .iter()
-        .filter(|&(_, v)| *v >= percent)
-        .collect::<Vec<_>>();
-
-    candidates.sort_by(|&(_, v1), &(_, v2)| v2.partial_cmp(v1).unwrap_or(Ordering::Equal));
-
-    if let Some((key, _)) = candidates.first() {
-        Some(key)
-    } else {
-        None
     }
 }
 
@@ -340,36 +334,4 @@ fn seconds_to_string(seconds: i64) -> Result<String> {
     }
 
     Ok(time_string.trim_start().to_string())
-}
-
-impl TryFrom<HashMap<String, OwnedValue>> for UpowerProperties {
-    type Error = zbus::zvariant::Error;
-
-    fn try_from(properties: HashMap<String, OwnedValue>) -> std::result::Result<Self, Self::Error> {
-        Ok(UpowerProperties {
-            percentage: properties["Percentage"].downcast_ref::<f64>()?,
-            icon_name: properties["IconName"].downcast_ref::<&str>()?.to_string(),
-            state: properties["State"].downcast_ref::<BatteryState>()?,
-            time_to_full: properties["TimeToFull"].downcast_ref::<i64>()?,
-            time_to_empty: properties["TimeToEmpty"].downcast_ref::<i64>()?,
-        })
-    }
-}
-
-impl Display for BatteryState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                BatteryState::Unknown => "Unknown",
-                BatteryState::Charging => "Charging",
-                BatteryState::Discharging => "Discharging",
-                BatteryState::Empty => "Empty",
-                BatteryState::FullyCharged => "Fully charged",
-                BatteryState::PendingCharge => "Pending charge",
-                BatteryState::PendingDischarge => "Pending discharge",
-            }
-        )
-    }
 }

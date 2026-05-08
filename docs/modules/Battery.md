@@ -12,13 +12,20 @@ Displays system power information such as the battery percentage, and estimated 
 
 > Type: `battery`
 
-| Name         | Type                 | Default         | Description                                                                                                                                          |
-|--------------|----------------------|-----------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `format`     | `string`             | `{percentage}%` | Format string to use for the widget button label.                                                                                                    |
-| `icon_size`  | `integer`            | `24`            | Size to render icon at.                                                                                                                              |
-| `thresholds` | `Map<string, float>` | `{}`            | Map of threshold names to apply as classes against the percentage at which to apply them. The nearest value above the current percentage is applied. |
-| `show_icon`  | `boolean`            | `true`          | Whether to show the icon.                                                                                                                            |
-| `show_label` | `boolean`            | `true`          | Whether to show the label.                                                                                                                           |
+| Name                   | Type      | Default         | Profile? | Description                                       |
+|------------------------|-----------|-----------------|----------|---------------------------------------------------|
+| `format`               | `string`  | `{percentage}%` | Yes      | Format string to use for the widget button label. |
+| `icon_size`            | `integer` | `24`            | No       | Size to render icon at.                           |
+| `show_icon`            | `boolean` | `true`          | No       | Whether to show the icon.                         |
+| `show_label`           | `boolean` | `true`          | No       | Whether to show the label.                        |
+| `use_default_profiles` | `boolean` | `true`          | No       | Whether default profiles should be used.          |
+
+This module uses **a compound threshold** with 1-2 values for profiles:
+
+- `percent` - `0-100`
+- `charging` - `true`/`false` (optional)
+
+Information on the profiles system can be found [here](profiles).
 
 <details>
 <summary>JSON</summary>
@@ -29,9 +36,12 @@ Displays system power information such as the battery percentage, and estimated 
     {
       "type": "battery",
       "format": "{percentage}%",
-      "thresholds": {
+      "profiles": {
         "warning": 20,
-        "critical": 5
+        "critical": {
+          "when": { "percent":  5, "charging": false },
+          "format": "[LOW] {percentage}%"
+        }
       }
     }
   ]
@@ -49,9 +59,12 @@ Displays system power information such as the battery percentage, and estimated 
 type = "battery"
 format = "{percentage}%"
 
-[end.thresholds]
+[end.profiles]
 warning = 20
-critical = 5
+
+[end.profiles.critical]
+when = { percent = 5, charging = false }
+format = "[LOW] {percentage}%"
 ```
 
 </details>
@@ -63,9 +76,13 @@ critical = 5
 end:
   - type: "battery"
     format: "{percentage}%"
-    thresholds:
+    profiles:
       warning: 20
-      critical: 5
+      critical:
+        when:
+          percent: 5
+          charging: false
+        format: "[LOW] {percentage}%"
 ```
 
 </details>
@@ -79,14 +96,20 @@ end:
     {
       type = "battery"
       format = "{percentage}%"
-      thresholds.warning = 20
-      thresholds.critical = 5
+      profiles.warning = 20
+      
+      profiles.critical.when = { percent = 5 charging = false }
+      profiles.critical.format = "[LOW] {percentage}%"
     }
   ]
 }
 ```
 
 </details>
+
+### Default profiles
+
+This module does not include any default profiles.
 
 ### Formatting Tokens
 

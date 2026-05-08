@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, trace};
 
 /// Main tray icon to show on the bar
+#[derive(Debug)]
 pub(crate) struct TrayMenu {
     pub box_content: GtkBox,
     pub widget: Button,
@@ -221,34 +222,25 @@ impl TrayMenu {
 
     /// Updates the label text, and shows it in favour of the image.
     pub fn set_label(&mut self, text: &str) {
-        if let Some(image) = self.image_widget.take() {
-            image.set_visible(false);
-        }
-
-        self.label_widget
-            .get_or_insert_with(|| {
-                let label = Label::new(None);
-                self.box_content.append(&label);
-                label
-            })
-            .set_label(text);
-    }
-
-    /// Shows the label, using its current text.
-    /// The image is hidden if present.
-    pub fn show_label(&self) {
         if let Some(image) = &self.image_widget {
             image.set_visible(false);
         }
 
-        if let Some(label) = &self.label_widget {
-            label.set_visible(true);
-        }
+        let label = self.label_widget.get_or_insert_with(|| {
+            let label = Label::new(None);
+            self.box_content.append(&label);
+            label
+        });
+
+        label.set_label(text);
+        label.set_visible(true);
     }
 
     /// Updates the image, and shows it in favour of the label.
     pub fn set_image(&mut self, image: &Picture) {
-        if let Some(label) = self.label_widget.take() {
+        let tooltip = self.widget.tooltip_text();
+
+        if let Some(label) = &self.label_widget {
             label.set_visible(false);
         }
 
@@ -257,6 +249,11 @@ impl TrayMenu {
         }
 
         self.box_content.append(image);
+        image.set_tooltip_text(tooltip.as_deref());
+    }
+
+    pub fn image_widget(&self) -> Option<&Picture> {
+        self.image_widget.as_ref()
     }
 
     pub fn label_widget(&self) -> Option<&Label> {
@@ -276,13 +273,16 @@ impl TrayMenu {
 
     pub fn set_tooltip(&self, tooltip: Option<Tooltip>) {
         let title = tooltip.map(|t| t.title);
+        let title = title.as_deref();
+
+        self.widget.set_tooltip_text(title);
 
         if let Some(widget) = &self.image_widget {
-            widget.set_tooltip_text(title.as_deref());
+            widget.set_tooltip_text(title);
         }
 
         if let Some(widget) = &self.label_widget {
-            widget.set_tooltip_text(title.as_deref());
+            widget.set_tooltip_text(title);
         }
     }
 

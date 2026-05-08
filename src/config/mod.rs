@@ -3,6 +3,7 @@ pub mod default;
 mod r#impl;
 mod layout;
 mod marquee;
+mod profiles;
 mod truncate;
 
 #[cfg(feature = "battery")]
@@ -11,6 +12,8 @@ use crate::modules::battery::BatteryModule;
 use crate::modules::bindmode::Bindmode;
 #[cfg(feature = "bluetooth")]
 use crate::modules::bluetooth::BluetoothModule;
+#[cfg(feature = "brightness")]
+use crate::modules::brightness::BrightnessModule;
 #[cfg(feature = "cairo")]
 use crate::modules::cairo::CairoModule;
 #[cfg(feature = "clipboard")]
@@ -51,6 +54,7 @@ use crate::modules::workspaces::WorkspacesModule;
 pub use self::common::{CommonConfig, ModuleJustification, ModuleOrientation, TransitionType};
 pub use self::layout::LayoutConfig;
 pub use self::marquee::{MarqueeMode, MarqueeOnHover};
+pub use self::profiles::{Profile, ProfileUpdateEvent, Profiles, State};
 pub use self::truncate::{EllipsizeMode, TruncateMode};
 
 use gtk::prelude::ObjectExt;
@@ -164,6 +168,8 @@ pub enum ModuleConfig {
     Bindmode(Box<Bindmode>),
     #[cfg(feature = "bluetooth")]
     Bluetooth(Box<BluetoothModule>),
+    #[cfg(feature = "brightness")]
+    Brightness(Box<BrightnessModule>),
     #[cfg(feature = "cairo")]
     Cairo(Box<CairoModule>),
     #[cfg(feature = "clipboard")]
@@ -222,6 +228,8 @@ impl ModuleConfig {
             Self::Bindmode(module) => create!(module),
             #[cfg(feature = "bluetooth")]
             Self::Bluetooth(module) => create!(module),
+            #[cfg(feature = "brightness")]
+            Self::Brightness(module) => create!(module),
             #[cfg(feature = "cairo")]
             Self::Cairo(module) => create!(module),
             #[cfg(feature = "clipboard")]
@@ -267,8 +275,10 @@ impl ModuleConfig {
             ModuleConfig::Battery(_) => "Battery",
             #[cfg(feature = "bindmode")]
             ModuleConfig::Bindmode(_) => "Bindmode",
+            #[cfg(feature = "brightness")]
+            ModuleConfig::Brightness(_) => "Brightness",
             #[cfg(feature = "cairo")]
-            ModuleConfig::Cairo(_) => "Cario",
+            ModuleConfig::Cairo(_) => "Cairo",
             #[cfg(feature = "clipboard")]
             ModuleConfig::Clipboard(_) => "Clipboard",
             #[cfg(feature = "clock")]
@@ -632,12 +642,31 @@ impl ConfigLocation {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ErrorLevel {
+    None,
+    Warn,
+    Error,
+}
+
+impl ErrorLevel {
+    fn warn(self) -> Self {
+        self.max(ErrorLevel::Warn)
+    }
+
+    fn error(self) -> Self {
+        self.max(ErrorLevel::Error)
+    }
+}
+
 impl Config {
     #[cfg(feature = "config")]
     pub fn load(
         config_location: ConfigLocation,
         css_location: Option<ConfigLocation>,
-    ) -> (Config, CssSource) {
+    ) -> (Config, CssSource, ErrorLevel) {
+        let mut error_level = ErrorLevel::None;
+
         cfg_if! {
             if #[cfg(feature = "config+corn")] {
                 const CONFIG_MINIMAL: (&str, FileFormat) = (include_str!("../../examples/minimal/config.corn"), FileFormat::Corn);
@@ -668,13 +697,14 @@ impl Config {
             ConfigLocation::Custom(mut path) => {
                 if path.is_dir() {
                     path = path.join("style.css")
-                } else if !path.ends_with(".css") {
+                } else if path.extension().is_none_or(|ext| ext != "css") {
                     path = path.parent().unwrap_or(&path).join("style.css");
                 };
 
                 if path.exists() {
                     CssSource::File(path)
                 } else {
+                    error_level = error_level.error();
                     error!(
                         "styles at '{}' not found, falling back to minimal theme",
                         path.display()
@@ -697,6 +727,7 @@ impl Config {
             .build()
             .and_then(|conf| conf.try_deserialize())
             .unwrap_or_else(|err| {
+                error_level = error_level.error();
                 error!("Error loading config: {err:?}");
                 config::Config::builder()
                     .add_source(config::File::from_str(CONFIG_MINIMAL.0, CONFIG_MINIMAL.1))
@@ -706,13 +737,14 @@ impl Config {
                     .expect("should be a valid config")
             });
 
-        #[cfg(feature = "ipc")]
+        #[cfg(any(feature = "ipc", feature = "cairo"))]
         if let Some(ironvars) = config.ironvar_defaults.take() {
             use crate::ironvar::WritableNamespace;
 
             let variable_manager = Ironbar::variable_manager();
             for (k, v) in ironvars {
                 if variable_manager.set(&k, v).is_err() {
+                    error_level = error_level.warn();
                     warn!("Ignoring invalid ironvar: '{k}'");
                 }
             }
@@ -723,7 +755,7 @@ impl Config {
         set_double_click_time(config.double_click_time.clone());
         set_color_scheme(config.color_scheme.clone());
 
-        (config, css_source)
+        (config, css_source, error_level)
     }
 
     #[cfg(not(feature = "config"))]

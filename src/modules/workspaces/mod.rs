@@ -6,7 +6,7 @@ use self::button::Button;
 use crate::channels::{AsyncSenderExt, BroadcastReceiverExt};
 use crate::clients::compositor::{Workspace, WorkspaceClient, WorkspaceUpdate};
 use crate::config::{CommonConfig, LayoutConfig, default};
-use crate::gtk_helpers::IronbarGtkExt;
+use crate::gtk_helpers::{IronbarGlibExt, IronbarGtkExt};
 use crate::modules::workspaces::button_map::{ButtonMap, Identifier};
 use crate::modules::workspaces::open_state::OpenState;
 use crate::modules::{Module, ModuleInfo, ModuleParts, WidgetContext};
@@ -16,6 +16,8 @@ use gtk::prelude::*;
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::ops::Deref;
+use std::rc::Rc;
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
@@ -42,6 +44,9 @@ pub enum SortOrder {
     /// Workspaces are sorted numerically first,
     /// and named workspaces are added to the end in alphabetical order.
     Name,
+
+    /// Shows workspaces in the order of their index within the compositor.
+    Index,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -55,6 +60,34 @@ pub enum Favorites {
 impl Default for Favorites {
     fn default() -> Self {
         Self::Global(vec![])
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+#[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
+pub enum Format {
+    String(String),
+    Pair {
+        #[serde(default = "default_format")]
+        named: String,
+        #[serde(default = "default_format")]
+        unnamed: String,
+    },
+}
+
+impl Default for Format {
+    fn default() -> Self {
+        Self::String(default_format())
+    }
+}
+
+impl Format {
+    pub fn resolve(&self) -> (String, String) {
+        match self {
+            Self::String(s) => (s.clone(), s.clone()),
+            Self::Pair { named, unnamed } => (named.clone(), unnamed.clone()),
+        }
     }
 }
 
@@ -127,6 +160,17 @@ pub struct WorkspacesModule {
     /// **Default**: `32`
     icon_size: i32,
 
+    /// The format string for named workspaces.
+    ///
+    /// The following placeholders are supported:
+    /// - `{label}`: The display label (from `name_map` or the workspace name).
+    /// - `{name}`: The actual workspace name.
+    /// - `{index}`: The workspace index.
+    ///
+    /// **Default**: `"{label}"`
+    #[serde(default)]
+    format: Format,
+
     // -- Common --
     /// See [layout options](module-level-options#layout)
     #[serde(default, flatten)]
@@ -135,6 +179,10 @@ pub struct WorkspacesModule {
     /// See [common options](module-level-options#common-options).
     #[serde(flatten)]
     pub common: Option<CommonConfig>,
+}
+
+fn default_format() -> String {
+    "{label}".to_string()
 }
 
 impl Default for WorkspacesModule {
@@ -146,6 +194,7 @@ impl Default for WorkspacesModule {
             all_monitors: false,
             sort: SortOrder::default(),
             icon_size: default::IconSize::Normal as i32,
+            format: Format::default(),
             layout: LayoutConfig::default(),
             common: Some(CommonConfig::default()),
         }
@@ -158,6 +207,26 @@ pub struct WorkspaceItemContext {
     icon_size: i32,
     image_provider: image::Provider,
     tx: mpsc::Sender<i64>,
+    format_named: String,
+    format_unnamed: String,
+}
+
+impl WorkspaceItemContext {
+    pub fn format_label(&self, name: &str, index: i64) -> String {
+        let label = self.name_map.get(name).map_or(name, String::as_str);
+
+        let is_named = name != index.to_string();
+        let format = if is_named {
+            &self.format_named
+        } else {
+            &self.format_unnamed
+        };
+
+        format
+            .replace("{label}", label)
+            .replace("{name}", name)
+            .replace("{index}", &index.to_string())
+    }
 }
 
 /// Re-orders the container children alphabetically,
@@ -165,25 +234,31 @@ pub struct WorkspaceItemContext {
 ///
 /// Named workspaces are always sorted before numbered ones.
 fn reorder_workspaces(container: &gtk::Box, sort_order: SortOrder) {
-    let mut buttons = container
+    let mut buttons: Vec<(String, Option<gtk::Widget>)> = container
         .children()
         .map(|child| {
-            let label = if sort_order == SortOrder::Label {
-                child
+            let label = match sort_order {
+                SortOrder::Label => child
                     .downcast_ref::<gtk::Button>()
                     .and_then(ButtonExt::label)
                     .unwrap_or_else(|| child.widget_name())
-            } else {
-                child.widget_name()
-            }
-            .to_string();
+                    .to_string(),
+                SortOrder::Index => {
+                    let index = child.get_tag::<i64>("workspace_index").copied();
+
+                    index
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| i64::MAX.to_string())
+                }
+                _ => child.widget_name().to_string(),
+            };
 
             (label, Some(child))
         })
-        .collect::<Vec<_>>();
+        .collect();
 
     buttons.sort_by(|(label_a, _), (label_b, _)| {
-        match (label_a.parse::<i32>(), label_b.parse::<i32>()) {
+        match (label_a.parse::<i64>(), label_b.parse::<i64>()) {
             (Ok(a), Ok(b)) => a.cmp(&b),
             (Ok(_), Err(_)) => Ordering::Less,
             (Err(_), Ok(_)) => Ordering::Greater,
@@ -254,11 +329,15 @@ impl Module<gtk::Box> for WorkspacesModule {
 
         let mut button_map = ButtonMap::new();
 
+        let (format_named, format_unnamed) = self.format.resolve();
+
         let item_context = WorkspaceItemContext {
             name_map: self.name_map.clone(),
             icon_size: self.icon_size,
             image_provider: context.ironbar.image_provider(),
             tx: context.controller_tx.clone(),
+            format_named,
+            format_unnamed,
         };
 
         // setup favorites
@@ -267,9 +346,20 @@ impl Module<gtk::Box> for WorkspacesModule {
             Favorites::Global(vec) => Some(vec),
         }
         .unwrap_or_default();
+        let favorites = Rc::new(favorites);
 
-        for favorite in &favorites {
-            let btn = Button::new(-1, favorite, OpenState::Closed, &item_context);
+        for favorite in favorites.deref() {
+            // Ensure numbered favorites actually refer to their respective numbered workspaces
+            let (id, index) = match favorite.parse::<i64>() {
+                Ok(num) => (num, num),
+                Err(_err) => {
+                    debug!("favorite name {favorite} failed to parse as i64");
+                    (-1, 0)
+                }
+            };
+            let btn = Button::new(id, index, favorite, OpenState::Closed, &item_context);
+
+            btn.button().set_tag("workspace_index", index);
             container.append(btn.button());
             button_map.insert(Identifier::Name(favorite.clone()), btn);
         }
@@ -284,22 +374,36 @@ impl Module<gtk::Box> for WorkspacesModule {
 
             let add_workspace = {
                 let container = container.clone();
+                let item_context = item_context.clone();
+                let favorites = favorites.clone();
                 move |workspace: Workspace, button_map: &mut ButtonMap| {
                     if favorites.contains(&workspace.name) {
                         let btn = button_map
-                            .get_mut(&Identifier::Name(workspace.name))
+                            .get_mut(&Identifier::Name(workspace.name.clone()))
                             .expect("favorite to exist");
 
                         // set an ID to track the open workspace for the favourite
                         btn.set_workspace_id(workspace.id);
                         btn.set_open_state(workspace.visibility.into());
+                        let label = item_context.format_label(&workspace.name, workspace.index);
+                        btn.set_label(&label);
+
+                        btn.button().set_tag("workspace_index", workspace.index);
+                    } else if let Some(btn) = button_map.find_button_mut(&workspace) {
+                        let label = item_context.format_label(&workspace.name, workspace.index);
+                        btn.set_label(&label);
+                        btn.button().set_tag("workspace_index", workspace.index);
                     } else {
                         let btn = Button::new(
                             workspace.id,
+                            workspace.index,
                             &workspace.name,
                             workspace.visibility.into(),
                             &item_context,
                         );
+
+                        btn.button().set_tag("workspace_index", workspace.index);
+
                         container.append(btn.button());
                         btn.button().set_visible(true);
 
@@ -310,8 +414,14 @@ impl Module<gtk::Box> for WorkspacesModule {
 
             let remove_workspace = {
                 let container = container.clone();
+                let favorites = favorites.clone();
                 move |id: i64, button_map: &mut ButtonMap| {
-                    // since favourites use name identifiers,
+                    // Prevent what ends up effectively being permanently disabling favorite
+                    // workspace buttons
+                    if favorites.contains(&id.to_string()) {
+                        return;
+                    }
+                    // since other favourites use name identifiers,
                     // we can safely remove using ID here and favourites will remain
                     if let Some(button) = button_map.remove(&Identifier::Id(id)) {
                         container.remove(button.button());
@@ -333,7 +443,6 @@ impl Module<gtk::Box> for WorkspacesModule {
                 };
             }
 
-            let name_map = self.name_map;
             context
                 .subscribe()
                 .recv_glib((), move |(), event| match event {
@@ -368,6 +477,10 @@ impl Module<gtk::Box> for WorkspacesModule {
                     WorkspaceUpdate::Remove(id) => remove_workspace(id, &mut button_map),
                     WorkspaceUpdate::Move(workspace) if has_initialized => {
                         if self.all_monitors {
+                            if !self.hidden.contains(&workspace.name) {
+                                add_workspace(workspace, &mut button_map);
+                                reorder!();
+                            }
                             return;
                         }
 
@@ -402,15 +515,23 @@ impl Module<gtk::Box> for WorkspacesModule {
                         }
                     }
                     WorkspaceUpdate::Rename { id, name } if has_initialized => {
-                        if let Some(button) = button_map
-                            .get(&Identifier::Id(id))
-                            .or_else(|| button_map.get(&Identifier::Name(name.clone())))
-                            .map(Button::button)
-                        {
-                            let display_name = name_map.get(&name).unwrap_or(&name);
+                        let button = if let Some(button) = button_map.get_mut(&Identifier::Id(id)) {
+                            Some(button)
+                        } else {
+                            button_map.get_mut(&Identifier::Name(name.clone()))
+                        };
 
-                            button.set_label(display_name);
-                            button.set_widget_name(&name);
+                        if let Some(button) = button {
+                            let index = button
+                                .button()
+                                .get_tag::<i64>("workspace_index")
+                                .copied()
+                                .unwrap_or(0);
+
+                            let display_name = item_context.format_label(&name, index);
+
+                            button.set_label(&display_name);
+                            button.button().set_widget_name(&name);
                         }
                     }
                     WorkspaceUpdate::Urgent { id, urgent } if has_initialized => {
@@ -436,5 +557,49 @@ impl Module<gtk::Box> for WorkspacesModule {
             widget: container,
             popup: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_deserialization() {
+        // Test string format
+        let json = r#""{label}""#;
+        let format: Format =
+            serde_json::from_str(json).expect("failed to deserialize string format");
+        assert_eq!(
+            format.resolve(),
+            ("{label}".to_string(), "{label}".to_string())
+        );
+
+        // Test object format
+        let json = r#"
+        {
+            "named": "{name}",
+            "unnamed": "{index}"
+        }
+        "#;
+        let format: Format =
+            serde_json::from_str(json).expect("failed to deserialize object format");
+        assert_eq!(
+            format.resolve(),
+            ("{name}".to_string(), "{index}".to_string())
+        );
+
+        // Test object format with defaults
+        let json = r#"
+        {
+            "named": "{name}"
+        }
+        "#;
+        let format: Format =
+            serde_json::from_str(json).expect("failed to deserialize object format with defaults");
+        assert_eq!(
+            format.resolve(),
+            ("{name}".to_string(), "{label}".to_string())
+        );
     }
 }

@@ -2,6 +2,7 @@
 #![deny(clippy::unwrap_used)]
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::env;
 use std::future::Future;
 use std::process::exit;
@@ -18,6 +19,7 @@ use gtk::gdk::{Display, Monitor};
 use gtk::prelude::*;
 use smithay_client_toolkit::output::OutputInfo;
 use tokio::runtime::Runtime;
+use tokio::sync::oneshot::Sender;
 use tokio::task::{JoinHandle, block_in_place};
 use tracing::{debug, error, info};
 
@@ -28,7 +30,7 @@ use crate::clients::outputs::MonitorState;
 use crate::config::{Config, ConfigLocation, MonitorConfig};
 use crate::desktop_file::DesktopFiles;
 use crate::error::ExitCode;
-#[cfg(feature = "ipc")]
+#[cfg(any(feature = "ipc", feature = "cairo"))]
 use crate::ironvar::VariableManager;
 use crate::style::{CssSource, load_css};
 
@@ -45,7 +47,7 @@ mod gtk_helpers;
 mod image;
 #[cfg(feature = "ipc")]
 mod ipc;
-#[cfg(feature = "ipc")]
+#[cfg(any(feature = "ipc", feature = "cairo"))]
 mod ironvar;
 mod logging;
 mod macros;
@@ -121,6 +123,23 @@ fn run_with_args() {
                 }
             });
         }
+        #[cfg(feature = "config")]
+        None if args.validate_config > 0 => {
+            let _guard = logging::install_logging(args.debug);
+
+            let (_, _, error_level) = Config::load(args.config.unwrap_or_default(), args.theme);
+
+            let err = match args.validate_config {
+                1 => error_level >= config::ErrorLevel::Error,
+                2 => error_level >= config::ErrorLevel::Warn,
+                _ => {
+                    error!("invalid validate_config level");
+                    exit(ExitCode::CliError as i32)
+                }
+            };
+
+            exit(err as i32);
+        }
         None => start_ironbar(args.debug, args.config.unwrap_or_default(), args.theme),
     }
 }
@@ -133,14 +152,22 @@ pub struct Ironbar {
     css_source: Rc<CssSource>,
     config_location: ConfigLocation,
     css_location: Option<ConfigLocation>,
-
+    scripts: Rc<RefCell<HashMap<String, Sender<()>>>>,
     desktop_files: DesktopFiles,
     image_provider: image::Provider,
 }
 
 impl Ironbar {
     fn new(config_location: ConfigLocation, css_location: Option<ConfigLocation>) -> Self {
-        let (mut config, css_source) = Config::load(config_location.clone(), css_location.clone());
+        cfg_if!(
+            if #[cfg(feature = "config")] {
+                let (mut config, css_source, _) =
+                    Config::load(config_location.clone(), css_location.clone());
+            } else {
+                let (mut config, css_source) =
+                    Config::load(config_location.clone(), css_location.clone());
+            }
+        );
 
         let desktop_files = DesktopFiles::new();
         let image_provider =
@@ -153,6 +180,7 @@ impl Ironbar {
             css_source: Rc::new(css_source),
             config_location,
             css_location,
+            scripts: rc_mut!(HashMap::new()),
             desktop_files,
             image_provider,
         }
@@ -290,7 +318,7 @@ impl Ironbar {
     }
 
     /// Gets the `Ironvar` manager singleton.
-    #[cfg(feature = "ipc")]
+    #[cfg(any(feature = "ipc", feature = "cairo"))]
     #[must_use]
     pub fn variable_manager() -> Arc<VariableManager> {
         static VARIABLE_MANAGER: OnceLock<Arc<VariableManager>> = OnceLock::new();
@@ -321,6 +349,26 @@ impl Ironbar {
             .filter(|&bar| bar.name() == name)
             .cloned()
             .collect()
+    }
+
+    /// Associates the command (`cmd`) of a script with a sender meant to
+    /// remotely kill the process.
+    ///
+    /// When ran it will terminate the previous script (if present) and register
+    /// this as the "new" script.
+    ///
+    /// The passed sender (`tx_terminate`) is used to remotely signal to a process
+    /// that it should terminate.
+    pub fn register_script(&self, cmd: &str, tx_terminate: Sender<()>) {
+        let mut set = self.scripts.borrow_mut();
+
+        if let Some(removed) = set.remove(cmd)
+            && removed.send(()).is_err()
+        {
+            error!("failed to send signal to script child process")
+        }
+
+        set.insert(cmd.to_owned(), tx_terminate);
     }
 
     /// Re-reads the config file from disk and replaces the active config.

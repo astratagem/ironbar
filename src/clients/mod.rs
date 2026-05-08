@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 #[cfg(feature = "bluetooth")]
 pub mod bluetooth;
+#[cfg(feature = "brightness")]
+pub mod brightness;
 #[cfg(feature = "clipboard")]
 pub mod clipboard;
 #[cfg(any(
@@ -75,6 +77,8 @@ pub struct Clients {
     sys_info: Option<Arc<sysinfo::Client>>,
     #[cfg(feature = "tray")]
     tray: Option<Arc<tray::Client>>,
+    #[cfg(feature = "brightness")]
+    brightness: Option<Arc<brightness::Client>>,
     #[cfg(feature = "battery")]
     upower: Option<Arc<upower::Client>>,
     #[cfg(feature = "volume")]
@@ -239,7 +243,7 @@ impl Clients {
             .get_or_insert_with(|| {
                 let client = Arc::new(sysinfo::Client::new());
 
-                #[cfg(feature = "ipc")]
+                #[cfg(any(feature = "ipc", feature = "cairo"))]
                 Ironbar::variable_manager().register_namespace("sysinfo", client.clone());
 
                 client
@@ -260,6 +264,23 @@ impl Clients {
         Ok(client)
     }
 
+    #[cfg(feature = "brightness")]
+    pub fn brightness(&mut self) -> ClientResult<brightness::Client> {
+        let client = if let Some(client) = &self.brightness {
+            client.clone()
+        } else {
+            let client = await_sync(async { brightness::Client::new().await })?;
+
+            #[cfg(feature = "ipc")]
+            Ironbar::variable_manager().register_namespace("brightness", client.clone());
+
+            self.brightness.replace(client.clone());
+            client
+        };
+
+        Ok(client)
+    }
+
     #[cfg(feature = "battery")]
     pub fn upower(&mut self) -> ClientResult<upower::Client> {
         let client = if let Some(client) = &self.upower {
@@ -267,7 +288,7 @@ impl Clients {
         } else {
             let client = await_sync(async { upower::Client::new().await })?;
 
-            #[cfg(feature = "ipc")]
+            #[cfg(any(feature = "ipc", feature = "cairo"))]
             Ironbar::variable_manager().register_namespace("upower", client.clone());
 
             self.upower.replace(client.clone());

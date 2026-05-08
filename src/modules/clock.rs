@@ -1,6 +1,7 @@
 use std::env;
+use std::time::Duration;
 
-use chrono::{DateTime, Local, Locale};
+use chrono::{DateTime, Local, Locale, Timelike};
 use color_eyre::Result;
 use gtk::prelude::*;
 use gtk::{Align, Button, Calendar, Label, Orientation};
@@ -47,6 +48,11 @@ pub struct ClockModule {
     /// **Default**: `$LC_TIME` or `$LANG` or `'POSIX'`
     locale: String,
 
+    /// Whether to show the week numbers in the popup calendar
+    ///
+    /// **Default**: `false`
+    show_week_numbers: bool,
+
     /// See [layout options](module-level-options#layout)
     #[serde(flatten)]
     layout: LayoutConfig,
@@ -62,6 +68,7 @@ impl Default for ClockModule {
             format: "%d/%m/%Y %H:%M".to_string(),
             format_popup: "%H:%M:%S".to_string(),
             locale: default_locale(),
+            show_week_numbers: false,
             layout: LayoutConfig::default(),
             common: Some(CommonConfig::default()),
         }
@@ -81,6 +88,20 @@ fn strip_tail(string: String) -> String {
         .unwrap_or(string)
 }
 
+/// Returns true if `format` (a chrono strftime template) contains any
+/// specifier whose rendered value changes within a minute.
+fn format_needs_second_precision(format: &str) -> bool {
+    const MODIFIERS: &[u8] = b"-_0.";
+    const SECOND_SPECIFIERS: &[u8] = b"STXrsc+f";
+
+    let mut bytes = format.bytes();
+    std::iter::from_fn(|| {
+        bytes.find(|&b| b == b'%')?;
+        bytes.find(|b| !b.is_ascii_digit() && !MODIFIERS.contains(b))
+    })
+    .any(|spec| SECOND_SPECIFIERS.contains(&spec))
+}
+
 impl Module<Button> for ClockModule {
     type SendMessage = DateTime<Local>;
     type ReceiveMessage = ();
@@ -94,11 +115,22 @@ impl Module<Button> for ClockModule {
         _rx: mpsc::Receiver<Self::ReceiveMessage>,
     ) -> Result<()> {
         let tx = context.tx.clone();
+        let needs_seconds = format_needs_second_precision(&self.format)
+            || format_needs_second_precision(&self.format_popup);
+
         spawn(async move {
             loop {
                 let date = Local::now();
                 tx.send_update(date).await;
-                sleep(tokio::time::Duration::from_millis(500)).await;
+                // Sleep just past the next second/minute boundary
+                let sub = u64::from(date.timestamp_subsec_millis());
+                let to_next = if needs_seconds {
+                    1000 - sub
+                } else {
+                    60 * 1000 - u64::from(date.second()) * 1000 - sub
+                };
+                // Overshoot boundary by 10ms
+                sleep(Duration::from_millis(to_next + 10)).await;
             }
         });
 
@@ -156,6 +188,8 @@ impl Module<Button> for ClockModule {
 
         let calendar = Calendar::new();
         calendar.add_css_class("calendar");
+        calendar.set_show_week_numbers(self.show_week_numbers);
+
         container.append(&calendar);
 
         let format = self.format_popup;
@@ -173,5 +207,60 @@ impl Module<Button> for ClockModule {
         });
 
         Some(container)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_needs_second_precision;
+
+    #[test]
+    fn format_needs_second_precision_classification() {
+        let cases = [
+            // Basic second-precision specifiers.
+            ("%S", true),
+            ("%T", true),
+            ("%X", true),
+            ("%r", true),
+            ("%s", true),
+            ("%c", true),
+            ("%+", true),
+            ("%f", true),
+            ("%H:%M:%S", true),
+            ("%Y-%m-%dT%H:%M:%S", true),
+            // Modifier-prefixed forms must also be detected.
+            ("%-S", true),
+            ("%0S", true),
+            ("%.f", true),
+            ("%3f", true),
+            ("%.6f", true),
+            // Known limitation: this format actually make chrono _panic_, this test is simply here
+            // to document the behaviour.
+            ("%------S", true),
+            // Minute-only / no-specifier formats.
+            ("%H:%M", false),
+            ("%R", false),
+            ("%Y-%m-%d", false),
+            ("%H", false),
+            ("", false),
+            ("plain text", false),
+            // `%%` is a literal `%`, not the start of a specifier.
+            ("%%S", false),
+            ("%%-S", false),
+            ("100%% load at %H:%M", false),
+            ("%%S now %S", true),
+            ("%dT%H:%M:%%S", false),
+            // Dangling `%`
+            ("%", false),
+            ("ends with %", false),
+            ("%-", false),
+        ];
+        for (fmt, expected) in cases {
+            assert_eq!(
+                format_needs_second_precision(fmt),
+                expected,
+                "format `{fmt}` expected needs_seconds={expected}"
+            );
+        }
     }
 }

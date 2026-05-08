@@ -8,11 +8,15 @@ repository = "https://github.com/jakestanger/ironbar"
 categories = ["gui"]
 keywords = ["gtk", "bar", "wayland", "wlroots", "gtk-layer-shell"]
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target-arch }{ archive-suffix }"
+
 [features]
 default = [
     "battery",
     "bindmode+all",
     "bluetooth",
+    "brightness",
     "cli",
     "cairo",
     "clipboard",
@@ -68,6 +72,8 @@ bindmode = []
 
 bluetooth = ["dep:bluer"]
 
+brightness = ["zbus"]
+
 cairo = ["lua-src", "mlua"]
 
 clipboard = ["dep:rustix"]
@@ -96,7 +102,7 @@ music = []
 "music+mpris" = ["music", "mpris"]
 "music+mpd" = ["music", "mpd-utils"]
 
-network_manager = ["futures-lite", "futures-signals", "zbus"]
+network_manager = ["futures-lite", "zbus"]
 
 notifications = ["zbus"]
 
@@ -120,12 +126,15 @@ niri = ["dep:serde_json"]
 
 extras = ["dep:schemars", "dep:clap_complete"]
 
+# -- test features --
+"battery.test" = ["battery"]
+
 [dependencies]
 # core
 gtk = { package = "gtk4", version = "0.10.0", features = ["v4_20"] }
 gtk-layer-shell = { package = "gtk4-layer-shell", version = "0.6.3" }
 glib = "0.21.1"
-tokio = { version = "1.48.0", features = [
+tokio = { version = "1.50.0", features = [
     "macros",
     "rt-multi-thread",
     "time",
@@ -136,38 +145,38 @@ tokio = { version = "1.48.0", features = [
     "fs"
 ] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "=0.3.19", features = ["env-filter"] } # pinned: https://github.com/tokio-rs/tracing/issues/3378
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-error = { version = "0.2.1", default-features = false }
-tracing-appender = "0.2.4"
+tracing-appender = "0.2.5"
 strip-ansi-escapes = "0.2.0"
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 color-eyre = "0.6.5"
 serde = { version = "1.0.228", features = ["derive"] }
-indexmap = { version = "2.12.1", features = ["serde"] }
+indexmap = { version = "2.14.0", features = ["serde"] }
 dirs = "6.0.0"
 walkdir = "2.5.0"
 notify = { version = "8.2.0", default-features = false }
 wayland-client = "0.31.1"
-wayland-protocols-wlr = { version = "0.3.9", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 smithay-client-toolkit = { version = "0.20.0", default-features = false, features = [
     "calloop",
 ] }
-config = { version = "0.15.19", default-features = false }
-ctrlc = "3.5.1"
+config = { version = "0.15.22", default-features = false }
+ctrlc = "3.5.2"
 cfg-if = "1.0.4"
 
 # bluetooth
 bluer = { version = "0.17.4", optional = true, features = ["bluetoothd"] }
 
 # cli
-clap = { version = "4.5.53", optional = true, features = ["derive", "env"] }
+clap = { version = "4.6.1", optional = true, features = ["derive", "env"] }
 
 # http
-reqwest = { version = "0.12.26", default-features = false, features = ["default-tls", "http2"], optional = true }
+reqwest = { version = "0.13.3", default-features = false, features = ["default-tls", "http2"], optional = true }
 
 # cairo
-lua-src = { version = "548.1.2", optional = true }
-mlua = { version = "0.11.5", optional = true, features = ["luajit", "send"] }
+lua-src = { version = "550.1.0", optional = true }
+mlua = { version = "0.11.6", optional = true, features = ["luajit", "send"] }
 
 # keyboard
 colpetto = { version = "0.7.0", features = ["tokio", "tracing"], optional = true }
@@ -175,29 +184,26 @@ evdev-rs = { version = "0.6.3", optional = true }
 
 # music
 mpd-utils = { version = "0.2.1", optional = true }
-mpris = { version = "2.0.1", optional = true }
-
-# network_manager
-futures-signals = { version = "0.3.34", optional = true }
+mpris = { version = "2.1.0", optional = true }
 
 # sys_info
-sysinfo = { version = "0.37.2", optional = true }
+sysinfo = { version = "0.38.4", optional = true }
 
 # tray
-system-tray = { version = "0.8.4", optional = true }
+system-tray = { version = "0.8.5", optional = true }
 
 # volume
 libpulse-binding = { version = "2.30.1", optional = true }
 
 # shared
 futures-lite = { version = "2.6.1", optional = true } # battery, network_manager, workspaces, keyboard
-zbus = { version = "5.12.0", default-features = false, features = ["tokio"], optional = true } # battery, network_manager, notifications
+zbus = { version = "5.15.0", default-features = false, features = ["tokio"], optional = true } # brightness, battery, network_manager, notifications
 swayipc-async = { version = "3.0.0", optional = true } # workspaces, keyboard
-chrono = { version = "0.4.42", optional = true, default-features = false, features = ["clock", "unstable-locales"] } # clock, inhibit
+chrono = { version = "0.4.44", optional = true, default-features = false, features = ["clock", "unstable-locales"] } # clock, inhibit
 hyprland = { version = "0.4.0-beta.3", optional = true } # workspaces, keyboard
-rustix = { version = "1.1.2", default-features = false, features = ["std", "fs", "pipe", "event"], optional = true } # clipboard, input
-serde_json = { version = "1.0.146", optional = true } # ipc, niri
+rustix = { version = "1.1.3", default-features = false, features = ["std", "fs", "pipe", "event"], optional = true } # clipboard, input
+serde_json = { version = "1.0.149", optional = true } # ipc, niri
 
 # extras
-schemars = { version = "1.1.0", optional = true, features = ["indexmap2"] }
-clap_complete = {  version = "4.5.62", optional = true }
+schemars = { version = "1.2.1", optional = true, features = ["indexmap2"] }
+clap_complete = {  version = "4.6.3", optional = true }
